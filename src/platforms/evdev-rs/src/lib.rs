@@ -15,7 +15,6 @@
  */
 
 // TODO: Report errors to Mir's logging facilities. We should do this following Mir's logging refactor.
-// TODO: Need to set up reporting events when received from libinput (report->received_event_from_kernel)
 // TODO: Implement continue after_config and pause_for_config
 
 // Some notes about the implementation here:
@@ -128,7 +127,7 @@ mod ffi_bridge {
     }
 
     #[derive(Copy, Clone)]
-    pub struct PointerSettings {
+    pub struct SetPointerSettingsData {
         pub handedness: i32,
         pub cursor_acceleration_bias: f64,
         pub acceleration: i32,
@@ -137,7 +136,7 @@ mod ffi_bridge {
     }
 
     #[derive(Copy, Clone, Default)]
-    pub struct PointerSettingsRs {
+    pub struct PointerSettings {
         pub is_set: bool,
         pub handedness: i32,
         pub cursor_acceleration_bias: f64,
@@ -205,17 +204,19 @@ mod ffi_bridge {
         fn name(self: &LibinputDeviceMetadata) -> &str;
         fn unique_id(self: &LibinputDeviceMetadata) -> &str;
         fn capabilities(self: &LibinputDeviceMetadata) -> u32;
-        fn get_pointer_settings(self: &LibinputDevice) -> Box<PointerSettingsRs>;
-        fn set_pointer_settings(self: &LibinputDevice, settings: &PointerSettings);
+        fn get_pointer_settings(self: &LibinputDevice) -> Box<PointerSettings>;
+        fn set_pointer_settings(self: &LibinputDevice, settings: &SetPointerSettingsData);
 
         fn evdev_rs_create(
             bridge: SharedPtr<PlatformBridge>,
             device_registry: SharedPtr<InputDeviceRegistry>,
+            reporter: UniquePtr<InputReport>,
         ) -> Box<PlatformRs>;
     }
 
     unsafe extern "C++" {
         include!("platform_bridge.h");
+        include!("input_report.h");
         include!("mir/input/input_device_registry.h");
         include!("mir/input/device_capability.h");
         include!("mir/input/input_sink.h");
@@ -225,13 +226,14 @@ mod ffi_bridge {
         include!("mir_toolkit/events/enums.h");
 
         pub type PlatformBridge;
+        pub type InputReport;
         pub type DeviceWrapper;
         pub type EventBuilderWrapper;
         pub type RectangleWrapper;
         // Map C++ KeyEventData to the Rust struct
         type KeyEventData = crate::ffi::KeyEventData;
         // Map C++ PointerEventData to the Rust struct
-        type PointerEventData = crate::ffi::PointerEventDataRs;
+        type PointerEventData = crate::ffi::PointerEventData;
         // TouchContactData and TouchEventData are defined above in the bridge
 
         #[namespace = "mir::input"]
@@ -300,6 +302,14 @@ mod ffi_bridge {
         pub fn y(self: &RectangleWrapper) -> i32;
         pub fn width(self: &RectangleWrapper) -> i32;
         pub fn height(self: &RectangleWrapper) -> i32;
+
+        pub fn received_event_from_kernel(
+            self: &InputReport,
+            when_microseconds: u64,
+            type_: i32,
+            code: i32,
+            value: i32,
+        );
     }
 }
 
@@ -313,8 +323,9 @@ pub use ffi_bridge::*;
 pub fn evdev_rs_create(
     bridge: cxx::SharedPtr<PlatformBridge>,
     device_registry: cxx::SharedPtr<InputDeviceRegistry>,
+    report: cxx::UniquePtr<InputReport>,
 ) -> Box<PlatformRs> {
-    return Box::new(PlatformRs::new(bridge, device_registry));
+    return Box::new(PlatformRs::new(bridge, device_registry, report));
 }
 
 // # Safety

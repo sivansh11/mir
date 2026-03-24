@@ -33,7 +33,30 @@ impl CppBuilder {
         self.includes.push(include);
     }
 
-    /// Output the C++ content to a string for the header file.
+    fn build_ret_string(method: &CppMethod) -> String {
+        method
+            .retval
+            .as_ref()
+            .map(|retval| cpp_type_to_string(retval, true))
+            .unwrap_or("void".to_string())
+    }
+
+    fn build_arg_str(method: &CppMethod) -> String {
+        let args: Vec<String> = method
+            .args
+            .iter()
+            .map(|arg| {
+                format!(
+                    "{} {}",
+                    cpp_type_to_string(&arg.cpp_type, false),
+                    sanitize_identifier(&arg.name)
+                )
+            })
+            .collect();
+        args.join(", ")
+    }
+
+    /// Generates the .h file contents corresponding to the information in this builder.
     pub fn to_cpp_header(&self) -> String {
         let mut result = String::new();
 
@@ -71,7 +94,7 @@ impl CppBuilder {
                     for option in &enum_.options {
                         result.push_str(&format!(
                             "        {} = {},\n",
-                            option.name,
+                            sanitize_identifier(&option.name),
                             option.value.to_string(),
                         ));
                     }
@@ -84,24 +107,20 @@ impl CppBuilder {
 
                 // Generate methods
                 for method in &class.methods {
-                    let args: Vec<String> = method
-                        .args
-                        .iter()
-                        .map(|arg| format!("{} {}", cpp_type_to_string(&arg.cpp_type), arg.name))
-                        .collect();
-                    let args_str = args.join(", ");
-
-                    let retstring = method
-                        .retval
-                        .as_ref()
-                        .map(cpp_type_to_string)
-                        .unwrap_or("void".to_string());
-
+                    let args_str = Self::build_arg_str(method);
+                    let retstring = Self::build_ret_string(method);
                     let method_name = sanitize_identifier(&method.name);
-                    result.push_str(&format!(
-                        "    virtual auto {}({}) -> {} = 0;\n",
-                        method_name, args_str, retstring
-                    ));
+                    if method.is_virtual {
+                        result.push_str(&format!(
+                            "    virtual auto {}({}) -> {} = 0;\n",
+                            method_name, args_str, retstring
+                        ));
+                    } else {
+                        result.push_str(&format!(
+                            "    auto {}({}) -> {};\n",
+                            method_name, args_str, retstring
+                        ));
+                    }
                 }
 
                 result.push_str("};\n\n");
@@ -119,13 +138,46 @@ impl CppBuilder {
         result
     }
 
+    /// Generates the .cpp file contents corresponding to the information in this builder.
+    pub fn to_cpp_source(&self, header_path: String) -> String {
+        let mut result = String::new();
+        result.push_str(&format!("#include \"{}\"\n\n", header_path));
+
+        for namespace in &self.namespaces {
+            let namespace_str = namespace.name.join("::");
+            for class in &namespace.classes {
+                for method in &class.methods {
+                    if method.is_virtual {
+                        continue;
+                    }
+
+                    let args_str = Self::build_arg_str(method);
+                    let retstring = Self::build_ret_string(method);
+
+                    result.push_str(&format!(
+                        "auto {}::{}::{}({}) -> {}\n",
+                        namespace_str, class.name, method.name, args_str, retstring
+                    ));
+                    result.push_str("{\n");
+                    result.push_str("  // TODO: Call out to Rust code here.\n");
+
+                    result.push_str("}\n\n");
+                }
+            }
+        }
+
+        result
+    }
+
     /// Generate Rust binding declarations for this C++ header.
+    ///
+    /// The Rust side will use these bindings to call into C++.
     ///
     /// Returns a `Vec<TokenStream>` where each element contains the `include!` directive,
     /// type declaration, and methods for a single C++ class, intended to be placed inside
     /// an `unsafe extern "C++"` block. This method does NOT add the surrounding `mod ffi`
     /// or `unsafe extern "C++"` blocks; callers are responsible for adding those themselves.
-    pub fn to_rust_bindings(&self) -> Vec<TokenStream> {
+    pub fn to_rust_cpp_bindings(&self) -> Vec<TokenStream> {
         let header_name = Literal::string(format!("include/{}.h", self.filename).as_str());
         // Include the corresponding C++ header once per protocol/header.
         let mut tokens: Vec<TokenStream> = Vec::new();
@@ -145,14 +197,16 @@ impl CppBuilder {
                         quote! { #arg_name: #arg_type }
                     });
 
+                    // Note: When generating Rust bindings for C++ methods that will mutate the underlying
+                    // C++ class, cxx.rs enforces that we `Pin` them.
                     if let Some(retval) = &method.retval {
                         let retval = cpp_type_to_rust_type(retval, true);
                         quote! {
-                            pub fn #method_name(self: &#class_name, #(#args),*) -> #retval;
+                            pub fn #method_name(self: Pin<&mut #class_name>, #(#args),*) -> #retval;
                         }
                     } else {
                         quote! {
-                            pub fn #method_name(self: &#class_name, #(#args),*);
+                            pub fn #method_name(self: Pin<&mut #class_name>, #(#args),*);
                         }
                     }
                 });
@@ -187,6 +241,10 @@ impl CppNamespace {
         self.classes
             .last_mut()
             .expect("classes cannot be empty after push")
+    }
+
+    pub fn add_forward_declaration_struct(&mut self, name: &str) {
+        self.forward_declarations.push(format!("struct {}", name));
     }
 
     pub fn add_forward_declaration_class(&mut self, name: &str) {
@@ -254,14 +312,16 @@ pub struct CppMethod {
     pub name: String,
     pub args: Vec<CppArg>,
     pub retval: Option<CppType>,
+    pub is_virtual: bool,
 }
 
 impl CppMethod {
-    pub fn new(name: String, retval: Option<CppType>) -> CppMethod {
+    pub fn new(name: String, retval: Option<CppType>, is_virtual: bool) -> CppMethod {
         CppMethod {
             name,
             args: vec![],
             retval,
+            is_virtual,
         }
     }
 
@@ -281,17 +341,25 @@ pub enum CppType {
     Object(String),
     Array,
     Fd,
+    Box(String),
 }
 
-fn cpp_type_to_string(cpp_type: &CppType) -> String {
+fn cpp_type_to_string(cpp_type: &CppType, is_retval: bool) -> String {
     match cpp_type {
         CppType::CppI32 => "int32_t".to_string(),
         CppType::CppU32 => "uint32_t".to_string(),
         CppType::CppF64 => "double".to_string(),
-        CppType::String => "rust::String const&".to_string(),
-        CppType::Object(name) => format!("std::unique_ptr<{}> const&", name),
-        CppType::Array => "rust::Vec<uint8_t> const&".to_string(),
+        CppType::String => "rust::String".to_string(),
+        CppType::Object(name) => {
+            if is_retval {
+                format!("std::unique_ptr<{}>", name)
+            } else {
+                format!("std::unique_ptr<{}> const&", name)
+            }
+        }
+        CppType::Array => "rust::Vec<uint8_t>".to_string(),
         CppType::Fd => "int32_t".to_string(),
+        CppType::Box(name) => format!("rust::Box<{}>", name),
     }
 }
 
@@ -311,12 +379,16 @@ fn cpp_type_to_rust_type(cpp_type: &CppType, is_retval: bool) -> TokenStream {
         }
         CppType::Array => quote! { Vec<u8> },
         CppType::Fd => quote! { i32 },
+        CppType::Box(name) => {
+            let type_name = format_ident!("{}", name);
+            quote! { Box<#type_name> }
+        }
     }
 }
 
-/// Sanitize an identifier to ensure it's valid for Rust.
+/// Sanitize an identifier to ensure it's valid for Rust and C++.
 /// If the identifier starts with a digit, prefix it with an underscore.
-/// If the identifier is a Rust keyword, prefix it with r#.
+/// If the identifier is a Rust keyword, prefix it with r_.
 pub fn sanitize_identifier(name: &str) -> String {
     if name.is_empty() {
         return "_empty".to_string();
@@ -325,8 +397,14 @@ pub fn sanitize_identifier(name: &str) -> String {
     // Try to parse as a regular identifier
     // If it fails (e.g., it's a keyword), use raw identifier
     match syn::parse_str::<Ident>(name) {
-        Ok(_) => name.to_string(),
-        Err(_) => format!("r#{}", name),
+        Ok(_) => {
+            if name == "namespace" {
+                "namespace_".to_string()
+            } else {
+                name.to_string()
+            }
+        }
+        Err(_) => format!("r_{}", name),
     }
 }
 

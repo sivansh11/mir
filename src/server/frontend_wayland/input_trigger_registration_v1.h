@@ -14,17 +14,24 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef MIR_INPUT_INPUT_MODIFIER_UTILS_H_
-#define MIR_INPUT_INPUT_MODIFIER_UTILS_H_
+#ifndef MIR_SERVER_FRONTEND_INPUT_TRIGGER_REGISTRATION_V1_H_
+#define MIR_SERVER_FRONTEND_INPUT_TRIGGER_REGISTRATION_V1_H_
 
-#include <mir_toolkit/event.h>
+#include "ext-input-trigger-registration-v1_wrapper.h"
+#include "input_trigger_registry.h"
 
 namespace mir
 {
-namespace input
+namespace frontend
 {
-MirInputEventModifiers expand_modifiers(MirInputEventModifiers modifiers);
-}
-}
+class KeyboardStateTracker;
 
+auto create_input_trigger_registration_manager_v1(
+    wl_display* display,
+    std::shared_ptr<InputTriggerRegistry::ActionGroupManager> const& action_group_manager,
+    std::shared_ptr<InputTriggerRegistry> const& input_trigger_registry,
+    std::shared_ptr<KeyboardStateTracker> const& keyboard_state_tracker)
+    -> std::shared_ptr<wayland::InputTriggerRegistrationManagerV1::Global>;
+}
+}
 #endif
